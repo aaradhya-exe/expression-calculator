@@ -1,0 +1,203 @@
+/*
+ * DSA Calculator Model
+ * Features: infix expression evaluation (two stacks) and linked-list history.
+ * Compile: gcc dsa_calculator.c -o calculator
+ */
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_EXPR 256
+#define STACK_SIZE 256
+
+typedef struct {
+    double items[STACK_SIZE];
+    int top;
+} NumberStack;
+
+typedef struct {
+    char items[STACK_SIZE];
+    int top;
+} OperatorStack;
+
+typedef struct HistoryNode {
+    char expression[MAX_EXPR];
+    double result;
+    struct HistoryNode *next;
+} HistoryNode;
+
+static void initNumberStack(NumberStack *s) { s->top = -1; }
+static void initOperatorStack(OperatorStack *s) { s->top = -1; }
+static int numberEmpty(const NumberStack *s) { return s->top == -1; }
+static int operatorEmpty(const OperatorStack *s) { return s->top == -1; }
+
+static int pushNumber(NumberStack *s, double value) {
+    if (s->top == STACK_SIZE - 1) return 0;
+    s->items[++s->top] = value;
+    return 1;
+}
+
+static int pushOperator(OperatorStack *s, char value) {
+    if (s->top == STACK_SIZE - 1) return 0;
+    s->items[++s->top] = value;
+    return 1;
+}
+
+static double popNumber(NumberStack *s) { return s->items[s->top--]; }
+static char popOperator(OperatorStack *s) { return s->items[s->top--]; }
+static char peekOperator(const OperatorStack *s) { return s->items[s->top]; }
+
+static int precedence(char op) {
+    if (op == '+' || op == '-') return 1;
+    if (op == '*' || op == '/') return 2;
+    return 0;
+}
+
+static int applyTopOperator(NumberStack *numbers, OperatorStack *operators) {
+    double left, right, answer;
+    char op;
+
+    if (numbers->top < 1 || operatorEmpty(operators)) return 0;
+    right = popNumber(numbers);
+    left = popNumber(numbers);
+    op = popOperator(operators);
+
+    switch (op) {
+        case '+': answer = left + right; break;
+        case '-': answer = left - right; break;
+        case '*': answer = left * right; break;
+        case '/':
+            if (right == 0) return 0;
+            answer = left / right;
+            break;
+        default: return 0;
+    }
+    return pushNumber(numbers, answer);
+}
+
+/* Returns 1 when valid; supports +, -, *, / and parentheses. */
+static int evaluateExpression(const char *expression, double *result) {
+    NumberStack numbers;
+    OperatorStack operators;
+    const char *p = expression;
+    int expectNumber = 1;
+
+    initNumberStack(&numbers);
+    initOperatorStack(&operators);
+
+    while (*p) {
+        if (isspace((unsigned char)*p)) { p++; continue; }
+
+        if (isdigit((unsigned char)*p) || *p == '.' ||
+            (expectNumber && (*p == '+' || *p == '-') &&
+             (isdigit((unsigned char)p[1]) || p[1] == '.'))) {
+            char *end;
+            double value = strtod(p, &end);
+            if (end == p || !pushNumber(&numbers, value)) return 0;
+            p = end;
+            expectNumber = 0;
+        } else if (*p == '(') {
+            if (!expectNumber || !pushOperator(&operators, *p)) return 0;
+            p++;
+        } else if (*p == ')') {
+            if (expectNumber) return 0;
+            while (!operatorEmpty(&operators) && peekOperator(&operators) != '(')
+                if (!applyTopOperator(&numbers, &operators)) return 0;
+            if (operatorEmpty(&operators)) return 0;
+            popOperator(&operators);
+            p++;
+            expectNumber = 0;
+        } else if (strchr("+-*/", *p)) {
+            char current = *p;
+            if (expectNumber) return 0;
+            while (!operatorEmpty(&operators) && peekOperator(&operators) != '(' &&
+                   precedence(peekOperator(&operators)) >= precedence(current))
+                if (!applyTopOperator(&numbers, &operators)) return 0;
+            if (!pushOperator(&operators, current)) return 0;
+            p++;
+            expectNumber = 1;
+        } else {
+            return 0;
+        }
+    }
+
+    if (expectNumber) return 0;
+    while (!operatorEmpty(&operators)) {
+        if (peekOperator(&operators) == '(' || !applyTopOperator(&numbers, &operators))
+            return 0;
+    }
+    if (numbers.top != 0) return 0;
+    *result = popNumber(&numbers);
+    return 1;
+}
+
+static void addHistory(HistoryNode **head, const char *expression, double result) {
+    HistoryNode *node = malloc(sizeof(*node));
+    if (!node) return;
+    strncpy(node->expression, expression, MAX_EXPR - 1);
+    node->expression[MAX_EXPR - 1] = '\0';
+    node->result = result;
+    node->next = *head;
+    *head = node;
+}
+
+static void showHistory(const HistoryNode *head) {
+    int number = 1;
+    if (!head) { puts("No calculations saved yet."); return; }
+    puts("\n--- Calculation History ---");
+    while (head) {
+        printf("%d. %s = %.6g\n", number++, head->expression, head->result);
+        head = head->next;
+    }
+}
+
+static void clearHistory(HistoryNode **head) {
+    while (*head) {
+        HistoryNode *next = (*head)->next;
+        free(*head);
+        *head = next;
+    }
+}
+
+int main(void) {
+    HistoryNode *history = NULL;
+    char input[MAX_EXPR];
+    int choice;
+
+    puts("=== DSA Calculator ===");
+    puts("Supported operators: +  -  *  /  and parentheses");
+
+    for (;;) {
+        printf("\n1. Calculate\n2. View history\n3. Clear history\n4. Exit\nChoose: ");
+        if (scanf("%d", &choice) != 1) break;
+        while (getchar() != '\n');
+
+        if (choice == 1) {
+            double result;
+            printf("Enter expression: ");
+            if (!fgets(input, sizeof(input), stdin)) break;
+            input[strcspn(input, "\n")] = '\0';
+            if (evaluateExpression(input, &result)) {
+                printf("Result = %.6g\n", result);
+                addHistory(&history, input, result);
+            } else {
+                puts("Invalid expression (check syntax or division by zero).");
+            }
+        } else if (choice == 2) {
+            showHistory(history);
+        } else if (choice == 3) {
+            clearHistory(&history);
+            puts("History cleared.");
+        } else if (choice == 4) {
+            break;
+        } else {
+            puts("Please choose a number from 1 to 4.");
+        }
+    }
+
+    clearHistory(&history);
+    puts("Goodbye!");
+    return 0;
+}
