@@ -1,203 +1,841 @@
 /*
- * DSA Calculator Model
- * Features: infix expression evaluation (two stacks) and linked-list history.
- * Compile: gcc dsa_calculator.c -o calculator
+ * Advanced Calculator in C
+ * ------------------------------------------------------------------
+ * Features:
+ *  - Expressions: + - * / % ^ (power) ! (factorial), parentheses, |x|
+ *  - Scientific functions: sin cos tan asin acos atan sinh cosh tanh
+ *    sqrt cbrt ln log log2 logb exp abs floor ceil round ...
+ *  - Number theory: gcd lcm ncr npr isprime fib
+ *  - Statistics: sum avg median std sstd var max min
+ *  - Constants: pi e tau phi, ans (last answer), user variables (x = 5)
+ *  - Memory: m+ m- mr mc
+ *  - Degree / Radian mode
+ *  - Base converter (bin/oct/dec/hex), unit converter
+ *  - Quadratic solver, 2x2 linear equations, EMI, simple/compound interest
+ *  - Linked-list history with save-to-file
+ *
+ * Compile: gcc calculator.c -o calculator -lm
+ * Run    : ./calculator
  */
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-#define MAX_EXPR 256
-#define STACK_SIZE 256
+#define MAX_LINE 512
+#define MAX_ARGS 32
+#define MAX_VARS 64
+#define NAME_LEN 24
+#define PI 3.14159265358979323846
 
-typedef struct {
-    double items[STACK_SIZE];
-    int top;
-} NumberStack;
-
-typedef struct {
-    char items[STACK_SIZE];
-    int top;
-} OperatorStack;
+/* ---------------- Global state ---------------- */
 
 typedef struct HistoryNode {
-    char expression[MAX_EXPR];
+    char expression[MAX_LINE];
     double result;
     struct HistoryNode *next;
 } HistoryNode;
 
-static void initNumberStack(NumberStack *s) { s->top = -1; }
-static void initOperatorStack(OperatorStack *s) { s->top = -1; }
-static int numberEmpty(const NumberStack *s) { return s->top == -1; }
-static int operatorEmpty(const OperatorStack *s) { return s->top == -1; }
+typedef struct {
+    char name[NAME_LEN];
+    double value;
+} Var;
 
-static int pushNumber(NumberStack *s, double value) {
-    if (s->top == STACK_SIZE - 1) return 0;
-    s->items[++s->top] = value;
-    return 1;
+static HistoryNode *history_head = NULL;
+static int history_count = 0;
+static Var vars[MAX_VARS];
+static int var_count = 0;
+static double memory_value = 0.0;
+static double last_answer = 0.0;
+static int degree_mode = 1; /* 1 = degrees, 0 = radians */
+
+/* ---------------- Parser ---------------- */
+
+typedef struct {
+    const char *p;
+    int error;
+    char msg[96];
+} Parser;
+
+static double parseExpr(Parser *ps);
+
+static void fail(Parser *ps, const char *m) {
+    if (!ps->error) {
+        ps->error = 1;
+        snprintf(ps->msg, sizeof ps->msg, "%s", m);
+    }
 }
 
-static int pushOperator(OperatorStack *s, char value) {
-    if (s->top == STACK_SIZE - 1) return 0;
-    s->items[++s->top] = value;
-    return 1;
+static void skip(Parser *ps) {
+    while (isspace((unsigned char)*ps->p)) ps->p++;
 }
 
-static double popNumber(NumberStack *s) { return s->items[s->top--]; }
-static char popOperator(OperatorStack *s) { return s->items[s->top--]; }
-static char peekOperator(const OperatorStack *s) { return s->items[s->top]; }
+static int isInt(double x) { return fabs(x - floor(x + 0.5)) < 1e-9; }
+static long long toLL(double x) { return (long long)floor(x + 0.5); }
+static double clean(double x) { return fabs(x) < 1e-12 ? 0.0 : x; }
+static double toRad(double x) { return degree_mode ? x * PI / 180.0 : x; }
+static double fromRad(double x) { return degree_mode ? x * 180.0 / PI : x; }
 
-static int precedence(char op) {
-    if (op == '+' || op == '-') return 1;
-    if (op == '*' || op == '/') return 2;
+/* ---------------- Variables ---------------- */
+
+static int isReserved(const char *n) {
+    return !strcmp(n, "pi") || !strcmp(n, "e") || !strcmp(n, "tau") ||
+           !strcmp(n, "phi") || !strcmp(n, "ans");
+}
+
+static int getVar(const char *name, double *out) {
+    if (!strcmp(name, "pi")) { *out = PI; return 1; }
+    if (!strcmp(name, "e")) { *out = 2.71828182845904523536; return 1; }
+    if (!strcmp(name, "tau")) { *out = 2 * PI; return 1; }
+    if (!strcmp(name, "phi")) { *out = 1.61803398874989484820; return 1; }
+    if (!strcmp(name, "ans")) { *out = last_answer; return 1; }
+    for (int i = 0; i < var_count; i++)
+        if (!strcmp(vars[i].name, name)) { *out = vars[i].value; return 1; }
     return 0;
 }
 
-static int applyTopOperator(NumberStack *numbers, OperatorStack *operators) {
-    double left, right, answer;
-    char op;
-
-    if (numbers->top < 1 || operatorEmpty(operators)) return 0;
-    right = popNumber(numbers);
-    left = popNumber(numbers);
-    op = popOperator(operators);
-
-    switch (op) {
-        case '+': answer = left + right; break;
-        case '-': answer = left - right; break;
-        case '*': answer = left * right; break;
-        case '/':
-            if (right == 0) return 0;
-            answer = left / right;
-            break;
-        default: return 0;
-    }
-    return pushNumber(numbers, answer);
-}
-
-/* Returns 1 when valid; supports +, -, *, / and parentheses. */
-static int evaluateExpression(const char *expression, double *result) {
-    NumberStack numbers;
-    OperatorStack operators;
-    const char *p = expression;
-    int expectNumber = 1;
-
-    initNumberStack(&numbers);
-    initOperatorStack(&operators);
-
-    while (*p) {
-        if (isspace((unsigned char)*p)) { p++; continue; }
-
-        if (isdigit((unsigned char)*p) || *p == '.' ||
-            (expectNumber && (*p == '+' || *p == '-') &&
-             (isdigit((unsigned char)p[1]) || p[1] == '.'))) {
-            char *end;
-            double value = strtod(p, &end);
-            if (end == p || !pushNumber(&numbers, value)) return 0;
-            p = end;
-            expectNumber = 0;
-        } else if (*p == '(') {
-            if (!expectNumber || !pushOperator(&operators, *p)) return 0;
-            p++;
-        } else if (*p == ')') {
-            if (expectNumber) return 0;
-            while (!operatorEmpty(&operators) && peekOperator(&operators) != '(')
-                if (!applyTopOperator(&numbers, &operators)) return 0;
-            if (operatorEmpty(&operators)) return 0;
-            popOperator(&operators);
-            p++;
-            expectNumber = 0;
-        } else if (strchr("+-*/", *p)) {
-            char current = *p;
-            if (expectNumber) return 0;
-            while (!operatorEmpty(&operators) && peekOperator(&operators) != '(' &&
-                   precedence(peekOperator(&operators)) >= precedence(current))
-                if (!applyTopOperator(&numbers, &operators)) return 0;
-            if (!pushOperator(&operators, current)) return 0;
-            p++;
-            expectNumber = 1;
-        } else {
-            return 0;
-        }
-    }
-
-    if (expectNumber) return 0;
-    while (!operatorEmpty(&operators)) {
-        if (peekOperator(&operators) == '(' || !applyTopOperator(&numbers, &operators))
-            return 0;
-    }
-    if (numbers.top != 0) return 0;
-    *result = popNumber(&numbers);
+static int setVar(const char *name, double value) {
+    for (int i = 0; i < var_count; i++)
+        if (!strcmp(vars[i].name, name)) { vars[i].value = value; return 1; }
+    if (var_count >= MAX_VARS) return 0;
+    snprintf(vars[var_count].name, NAME_LEN, "%s", name);
+    vars[var_count++].value = value;
     return 1;
 }
 
-static void addHistory(HistoryNode **head, const char *expression, double result) {
-    HistoryNode *node = malloc(sizeof(*node));
-    if (!node) return;
-    strncpy(node->expression, expression, MAX_EXPR - 1);
-    node->expression[MAX_EXPR - 1] = '\0';
-    node->result = result;
-    node->next = *head;
-    *head = node;
+/* ---------------- Math helpers ---------------- */
+
+static double factorialOf(Parser *ps, double x) {
+    double r = 1;
+    if (x < 0 || !isInt(x)) { fail(ps, "Factorial needs a non-negative integer"); return 0; }
+    if (x > 170) { fail(ps, "Factorial too large (max 170)"); return 0; }
+    for (int i = 2; i <= (int)(x + 0.5); i++) r *= i;
+    return r;
 }
 
-static void showHistory(const HistoryNode *head) {
-    int number = 1;
-    if (!head) { puts("No calculations saved yet."); return; }
-    puts("\n--- Calculation History ---");
-    while (head) {
-        printf("%d. %s = %.6g\n", number++, head->expression, head->result);
-        head = head->next;
+static long long gcdLL(long long a, long long b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b) { long long t = a % b; a = b; b = t; }
+    return a;
+}
+
+static int isPrimeLL(long long n) {
+    if (n < 2) return 0;
+    if (n % 2 == 0) return n == 2;
+    for (long long i = 3; i * i <= n; i += 2)
+        if (n % i == 0) return 0;
+    return 1;
+}
+
+static double combos(Parser *ps, double n, double r) {
+    double res = 1;
+    if (!isInt(n) || !isInt(r) || n < 0 || r < 0 || r > n) {
+        fail(ps, "nCr needs integers with 0 <= r <= n");
+        return 0;
     }
+    n = floor(n + 0.5); r = floor(r + 0.5);
+    if (r > n - r) r = n - r;
+    for (double i = 1; i <= r; i++) res = res * (n - r + i) / i;
+    return floor(res + 0.5);
 }
 
-static void clearHistory(HistoryNode **head) {
-    while (*head) {
-        HistoryNode *next = (*head)->next;
-        free(*head);
-        *head = next;
+static double perms(Parser *ps, double n, double r) {
+    double res = 1;
+    if (!isInt(n) || !isInt(r) || n < 0 || r < 0 || r > n) {
+        fail(ps, "nPr needs integers with 0 <= r <= n");
+        return 0;
     }
+    for (int i = 0; i < (int)(r + 0.5); i++) res *= (floor(n + 0.5) - i);
+    return res;
 }
 
-int main(void) {
-    HistoryNode *history = NULL;
-    char input[MAX_EXPR];
-    int choice;
+static int cmpDouble(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
 
-    puts("=== DSA Calculator ===");
-    puts("Supported operators: +  -  *  /  and parentheses");
+static double variance(const double *a, int n, int sample) {
+    double mean = 0, s = 0;
+    for (int i = 0; i < n; i++) mean += a[i];
+    mean /= n;
+    for (int i = 0; i < n; i++) s += (a[i] - mean) * (a[i] - mean);
+    return s / (sample ? n - 1 : n);
+}
 
-    for (;;) {
-        printf("\n1. Calculate\n2. View history\n3. Clear history\n4. Exit\nChoose: ");
-        if (scanf("%d", &choice) != 1) break;
-        while (getchar() != '\n');
+/* ---------------- Function dispatcher ---------------- */
 
-        if (choice == 1) {
-            double result;
-            printf("Enter expression: ");
-            if (!fgets(input, sizeof(input), stdin)) break;
-            input[strcspn(input, "\n")] = '\0';
-            if (evaluateExpression(input, &result)) {
-                printf("Result = %.6g\n", result);
-                addHistory(&history, input, result);
-            } else {
-                puts("Invalid expression (check syntax or division by zero).");
-            }
-        } else if (choice == 2) {
-            showHistory(history);
-        } else if (choice == 3) {
-            clearHistory(&history);
-            puts("History cleared.");
-        } else if (choice == 4) {
-            break;
-        } else {
-            puts("Please choose a number from 1 to 4.");
+#define IS(s) (strcmp(name, (s)) == 0)
+#define NEED(k) do { if (n != (k)) { fail(ps, "Wrong number of arguments"); return 0; } } while (0)
+
+static double callFunction(Parser *ps, const char *name, double *a, int n) {
+    /* ---- variadic / statistics ---- */
+    if (IS("sum") || IS("avg") || IS("mean") || IS("max") || IS("min") ||
+        IS("median") || IS("std") || IS("sstd") || IS("var") || IS("product")) {
+        double s = 0, p = 1, mx, mn;
+        if (n < 1) { fail(ps, "Needs at least one argument"); return 0; }
+        mx = mn = a[0];
+        for (int i = 0; i < n; i++) {
+            s += a[i]; p *= a[i];
+            if (a[i] > mx) mx = a[i];
+            if (a[i] < mn) mn = a[i];
+        }
+        if (IS("sum")) return s;
+        if (IS("product")) return p;
+        if (IS("avg") || IS("mean")) return s / n;
+        if (IS("max")) return mx;
+        if (IS("min")) return mn;
+        if (IS("median")) {
+            double tmp[MAX_ARGS];
+            memcpy(tmp, a, n * sizeof(double));
+            qsort(tmp, n, sizeof(double), cmpDouble);
+            return (n % 2) ? tmp[n / 2] : (tmp[n / 2 - 1] + tmp[n / 2]) / 2.0;
+        }
+        if (IS("std")) return sqrt(variance(a, n, 0));
+        if (IS("var")) return variance(a, n, 0);
+        if (IS("sstd")) {
+            if (n < 2) { fail(ps, "Sample std needs 2+ values"); return 0; }
+            return sqrt(variance(a, n, 1));
         }
     }
 
-    clearHistory(&history);
+    /* ---- zero-argument ---- */
+    if (IS("rand")) { NEED(0); return rand() / (double)RAND_MAX; }
+
+    /* ---- one-argument ---- */
+    if (IS("sin")) { NEED(1); return clean(sin(toRad(a[0]))); }
+    if (IS("cos")) { NEED(1); return clean(cos(toRad(a[0]))); }
+    if (IS("tan")) {
+        NEED(1);
+        if (fabs(cos(toRad(a[0]))) < 1e-12) { fail(ps, "tan is undefined here"); return 0; }
+        return clean(tan(toRad(a[0])));
+    }
+    if (IS("asin")) { NEED(1); if (fabs(a[0]) > 1) { fail(ps, "asin needs -1..1"); return 0; } return fromRad(asin(a[0])); }
+    if (IS("acos")) { NEED(1); if (fabs(a[0]) > 1) { fail(ps, "acos needs -1..1"); return 0; } return fromRad(acos(a[0])); }
+    if (IS("atan")) { NEED(1); return fromRad(atan(a[0])); }
+    if (IS("sinh")) { NEED(1); return sinh(a[0]); }
+    if (IS("cosh")) { NEED(1); return cosh(a[0]); }
+    if (IS("tanh")) { NEED(1); return tanh(a[0]); }
+    if (IS("sqrt")) { NEED(1); if (a[0] < 0) { fail(ps, "sqrt of negative number"); return 0; } return sqrt(a[0]); }
+    if (IS("cbrt")) { NEED(1); return cbrt(a[0]); }
+    if (IS("abs")) { NEED(1); return fabs(a[0]); }
+    if (IS("ln")) { NEED(1); if (a[0] <= 0) { fail(ps, "ln needs a positive number"); return 0; } return log(a[0]); }
+    if (IS("log")) { NEED(1); if (a[0] <= 0) { fail(ps, "log needs a positive number"); return 0; } return log10(a[0]); }
+    if (IS("log2")) { NEED(1); if (a[0] <= 0) { fail(ps, "log2 needs a positive number"); return 0; } return log2(a[0]); }
+    if (IS("exp")) { NEED(1); return exp(a[0]); }
+    if (IS("floor")) { NEED(1); return floor(a[0]); }
+    if (IS("ceil")) { NEED(1); return ceil(a[0]); }
+    if (IS("sign")) { NEED(1); return (a[0] > 0) - (a[0] < 0); }
+    if (IS("fact")) { NEED(1); return factorialOf(ps, a[0]); }
+    if (IS("deg")) { NEED(1); return a[0] * 180.0 / PI; }  /* radians -> degrees */
+    if (IS("rad")) { NEED(1); return a[0] * PI / 180.0; }  /* degrees -> radians */
+    if (IS("isprime")) { NEED(1); return isInt(a[0]) && isPrimeLL(toLL(a[0])); }
+    if (IS("fib")) {
+        double x = 0, y = 1;
+        NEED(1);
+        if (!isInt(a[0]) || a[0] < 0 || a[0] > 1000) { fail(ps, "fib needs integer 0..1000"); return 0; }
+        for (int i = 0; i < toLL(a[0]); i++) { double t = x + y; x = y; y = t; }
+        return x;
+    }
+
+    /* ---- round: 1 or 2 args ---- */
+    if (IS("round")) {
+        if (n == 1) return round(a[0]);
+        if (n == 2) { double m = pow(10, a[1]); return round(a[0] * m) / m; }
+        fail(ps, "round(x) or round(x, places)");
+        return 0;
+    }
+
+    /* ---- two-argument ---- */
+    if (IS("pow")) { NEED(2); return pow(a[0], a[1]); }
+    if (IS("root")) {
+        NEED(2);
+        if (a[1] == 0) { fail(ps, "Root degree cannot be 0"); return 0; }
+        if (a[0] < 0 && !(isInt(a[1]) && ((long long)llabs(toLL(a[1])) % 2 == 1))) {
+            fail(ps, "Even root of negative number"); return 0;
+        }
+        return a[0] < 0 ? -pow(-a[0], 1.0 / a[1]) : pow(a[0], 1.0 / a[1]);
+    }
+    if (IS("mod")) { NEED(2); if (a[1] == 0) { fail(ps, "Modulo by zero"); return 0; } return fmod(a[0], a[1]); }
+    if (IS("hypot")) { NEED(2); return hypot(a[0], a[1]); }
+    if (IS("atan2")) { NEED(2); return fromRad(atan2(a[0], a[1])); }
+    if (IS("logb")) {
+        NEED(2);
+        if (a[0] <= 0 || a[0] == 1 || a[1] <= 0) { fail(ps, "logb(base, x) invalid input"); return 0; }
+        return log(a[1]) / log(a[0]);
+    }
+    if (IS("pct")) { NEED(2); return a[0] * a[1] / 100.0; } /* pct(p, x) = p% of x */
+    if (IS("ncr")) { NEED(2); return combos(ps, a[0], a[1]); }
+    if (IS("npr")) { NEED(2); return perms(ps, a[0], a[1]); }
+    if (IS("gcd") || IS("lcm")) {
+        long long x, y, g;
+        NEED(2);
+        if (!isInt(a[0]) || !isInt(a[1])) { fail(ps, "gcd/lcm need integers"); return 0; }
+        x = toLL(a[0]); y = toLL(a[1]);
+        g = gcdLL(x, y);
+        if (IS("gcd")) return (double)g;
+        return g == 0 ? 0 : (double)(llabs(x / g * y));
+    }
+    if (IS("randint")) {
+        long long lo, hi;
+        NEED(2);
+        lo = toLL(a[0]); hi = toLL(a[1]);
+        if (hi < lo) { fail(ps, "randint(lo, hi) needs lo <= hi"); return 0; }
+        return (double)(lo + rand() % (hi - lo + 1));
+    }
+
+    fail(ps, "Unknown function");
+    return 0;
+}
+
+/* ---------------- Recursive-descent grammar ----------------
+ * expr    := term   (('+'|'-') term)*
+ * term    := unary  (('*'|'/'|'%') unary)*
+ * unary   := ('+'|'-') unary | power
+ * power   := postfix (('^'|'**') unary)?
+ * postfix := primary '!'*
+ * primary := number | '(' expr ')' | '|' expr '|' | name | name '(' args ')'
+ */
+
+static double parsePrimary(Parser *ps) {
+    skip(ps);
+    if (isdigit((unsigned char)*ps->p) || *ps->p == '.') {
+        char *end;
+        double v = strtod(ps->p, &end);
+        if (end == ps->p) { fail(ps, "Bad number"); return 0; }
+        ps->p = end;
+        return v;
+    }
+    if (*ps->p == '(') {
+        double v;
+        ps->p++;
+        v = parseExpr(ps);
+        skip(ps);
+        if (*ps->p != ')') { fail(ps, "Missing closing parenthesis"); return 0; }
+        ps->p++;
+        return v;
+    }
+    if (*ps->p == '|') {
+        double v;
+        ps->p++;
+        v = parseExpr(ps);
+        skip(ps);
+        if (*ps->p != '|') { fail(ps, "Missing closing |"); return 0; }
+        ps->p++;
+        return fabs(v);
+    }
+    if (isalpha((unsigned char)*ps->p) || *ps->p == '_') {
+        char name[NAME_LEN];
+        int len = 0;
+        while ((isalnum((unsigned char)*ps->p) || *ps->p == '_') && len < NAME_LEN - 1)
+            name[len++] = (char)tolower((unsigned char)*ps->p++);
+        name[len] = '\0';
+        skip(ps);
+        if (*ps->p == '(') {
+            double args[MAX_ARGS];
+            int n = 0;
+            ps->p++;
+            skip(ps);
+            if (*ps->p == ')') {
+                ps->p++;
+            } else {
+                for (;;) {
+                    if (n >= MAX_ARGS) { fail(ps, "Too many arguments"); return 0; }
+                    args[n++] = parseExpr(ps);
+                    if (ps->error) return 0;
+                    skip(ps);
+                    if (*ps->p == ',') { ps->p++; continue; }
+                    if (*ps->p == ')') { ps->p++; break; }
+                    fail(ps, "Expected ',' or ')' in function call");
+                    return 0;
+                }
+            }
+            return callFunction(ps, name, args, n);
+        } else {
+            double v;
+            if (!getVar(name, &v)) { fail(ps, "Unknown variable or constant"); return 0; }
+            return v;
+        }
+    }
+    if (*ps->p == '\0') fail(ps, "Expression ended unexpectedly");
+    else fail(ps, "Unexpected character in expression");
+    return 0;
+}
+
+static double parsePostfix(Parser *ps) {
+    double v = parsePrimary(ps);
+    for (;;) {
+        skip(ps);
+        if (!ps->error && *ps->p == '!' && ps->p[1] != '=') {
+            ps->p++;
+            v = factorialOf(ps, v);
+        } else break;
+    }
+    return v;
+}
+
+static double parseUnary(Parser *ps);
+
+static double parsePower(Parser *ps) {
+    double base = parsePostfix(ps);
+    skip(ps);
+    if (ps->error) return 0;
+    if (*ps->p == '^' || (*ps->p == '*' && ps->p[1] == '*')) {
+        double ex;
+        ps->p += (*ps->p == '^') ? 1 : 2;
+        ex = parseUnary(ps); /* right associative */
+        if (base < 0 && !isInt(ex)) { fail(ps, "Negative base with fractional power"); return 0; }
+        if (base == 0 && ex < 0) { fail(ps, "Division by zero"); return 0; }
+        return pow(base, ex);
+    }
+    return base;
+}
+
+static double parseUnary(Parser *ps) {
+    skip(ps);
+    if (*ps->p == '-') { ps->p++; return -parseUnary(ps); }
+    if (*ps->p == '+') { ps->p++; return parseUnary(ps); }
+    return parsePower(ps);
+}
+
+static double parseTerm(Parser *ps) {
+    double v = parseUnary(ps);
+    for (;;) {
+        skip(ps);
+        if (ps->error) return 0;
+        if (*ps->p == '*' && ps->p[1] != '*') {
+            ps->p++;
+            v *= parseUnary(ps);
+        } else if (*ps->p == '/') {
+            double d;
+            ps->p++;
+            d = parseUnary(ps);
+            if (!ps->error && d == 0) { fail(ps, "Division by zero"); return 0; }
+            v /= d;
+        } else if (*ps->p == '%') {
+            double d;
+            ps->p++;
+            d = parseUnary(ps);
+            if (!ps->error && d == 0) { fail(ps, "Modulo by zero"); return 0; }
+            v = fmod(v, d);
+        } else break;
+    }
+    return v;
+}
+
+static double parseExpr(Parser *ps) {
+    double v = parseTerm(ps);
+    for (;;) {
+        skip(ps);
+        if (ps->error) return 0;
+        if (*ps->p == '+') { ps->p++; v += parseTerm(ps); }
+        else if (*ps->p == '-') { ps->p++; v -= parseTerm(ps); }
+        else break;
+    }
+    return v;
+}
+
+/* Evaluate a full expression string. Returns 1 on success. */
+static int evaluate(const char *s, double *out, char *err, size_t errsz) {
+    Parser ps;
+    double v;
+    ps.p = s; ps.error = 0; ps.msg[0] = '\0';
+    v = parseExpr(&ps);
+    skip(&ps);
+    if (!ps.error && *ps.p) fail(&ps, "Unexpected text after expression");
+    if (!ps.error && !isfinite(v)) fail(&ps, "Math error (result is not finite)");
+    if (ps.error) { snprintf(err, errsz, "%s", ps.msg); return 0; }
+    *out = v;
+    return 1;
+}
+
+/* Parse "a, b, c" into numbers. Returns count, or -1 on error. */
+static int parseList(const char *s, double *out, int max, char *err, size_t errsz) {
+    Parser ps;
+    int n = 0;
+    ps.p = s; ps.error = 0; ps.msg[0] = '\0';
+    skip(&ps);
+    if (!*ps.p) return 0;
+    for (;;) {
+        if (n >= max) { fail(&ps, "Too many values"); break; }
+        out[n++] = parseExpr(&ps);
+        skip(&ps);
+        if (ps.error) break;
+        if (*ps.p == ',') { ps.p++; continue; }
+        break;
+    }
+    skip(&ps);
+    if (!ps.error && *ps.p) fail(&ps, "Unexpected text in input");
+    if (ps.error) { snprintf(err, errsz, "%s", ps.msg); return -1; }
+    return n;
+}
+
+/* ---------------- Output ---------------- */
+
+static void formatNumber(double v, char *buf, size_t sz) {
+    if (v == 0) v = 0.0; /* avoid "-0" */
+    if (fabs(v) < 1e15 && v == floor(v)) snprintf(buf, sz, "%.0f", v);
+    else snprintf(buf, sz, "%.10g", v);
+}
+
+static void printNumber(double v) {
+    char b[64];
+    formatNumber(v, b, sizeof b);
+    printf("%s", b);
+}
+
+/* ---------------- History (linked list) ---------------- */
+
+static void addHistory(const char *expr, double result) {
+    HistoryNode *node = malloc(sizeof(*node));
+    if (!node) return;
+    strncpy(node->expression, expr, MAX_LINE - 1);
+    node->expression[MAX_LINE - 1] = '\0';
+    node->result = result;
+    node->next = history_head;
+    history_head = node;
+    history_count++;
+}
+
+static void showHistory(void) {
+    int i = 1;
+    char b[64];
+    if (!history_head) { puts("No calculations saved yet."); return; }
+    puts("\n--- History (latest first) ---");
+    for (HistoryNode *h = history_head; h; h = h->next) {
+        formatNumber(h->result, b, sizeof b);
+        printf("%3d. %s = %s\n", i++, h->expression, b);
+    }
+}
+
+static void clearHistory(void) {
+    while (history_head) {
+        HistoryNode *next = history_head->next;
+        free(history_head);
+        history_head = next;
+    }
+    history_count = 0;
+}
+
+static void saveHistory(void) {
+    FILE *f;
+    char b[64];
+    if (!history_head) { puts("Nothing to save."); return; }
+    f = fopen("calc_history.txt", "w");
+    if (!f) { puts("Could not open calc_history.txt for writing."); return; }
+    for (HistoryNode *h = history_head; h; h = h->next) {
+        formatNumber(h->result, b, sizeof b);
+        fprintf(f, "%s = %s\n", h->expression, b);
+    }
+    fclose(f);
+    puts("History saved to calc_history.txt");
+}
+
+/* ---------------- Unit converter ---------------- */
+
+typedef struct { const char *name; int category; double factor; } Unit;
+/* categories: 0 length(m) 1 mass(kg) 2 time(s) 3 data(bytes) 4 speed(m/s) 5 temperature */
+static const Unit units[] = {
+    {"m", 0, 1}, {"km", 0, 1000}, {"cm", 0, 0.01}, {"mm", 0, 0.001},
+    {"mi", 0, 1609.344}, {"yd", 0, 0.9144}, {"ft", 0, 0.3048}, {"in", 0, 0.0254},
+    {"kg", 1, 1}, {"g", 1, 0.001}, {"mg", 1, 1e-6}, {"lb", 1, 0.45359237},
+    {"oz", 1, 0.028349523125}, {"ton", 1, 1000},
+    {"s", 2, 1}, {"min", 2, 60}, {"h", 2, 3600}, {"day", 2, 86400}, {"week", 2, 604800},
+    {"b", 3, 1}, {"kb", 3, 1024}, {"mb", 3, 1048576}, {"gb", 3, 1073741824.0},
+    {"ms", 4, 1}, {"kmh", 4, 1000.0 / 3600.0}, {"mph", 4, 0.44704},
+    {"c", 5, 0}, {"f", 5, 0}, {"k", 5, 0}
+};
+
+static const Unit *findUnit(const char *name) {
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++)
+        if (!strcmp(units[i].name, name)) return &units[i];
+    return NULL;
+}
+
+static void doConvert(const char *rest) {
+    char vs[64], from[16], to[16];
+    char *end;
+    double v, out;
+    const Unit *a, *b;
+    if (sscanf(rest, "%63s %15s %15s", vs, from, to) != 3) {
+        puts("Usage: convert <value> <from> <to>   e.g. convert 100 km mi");
+        return;
+    }
+    v = strtod(vs, &end);
+    if (*end) { puts("Invalid number."); return; }
+    for (char *c = from; *c; c++) *c = (char)tolower((unsigned char)*c);
+    for (char *c = to; *c; c++) *c = (char)tolower((unsigned char)*c);
+    a = findUnit(from); b = findUnit(to);
+    if (!a || !b) { puts("Unknown unit. Type 'units' to see supported units."); return; }
+    if (a->category != b->category) { puts("Cannot convert between different kinds of units."); return; }
+    if (a->category == 5) {
+        double c;
+        if (!strcmp(from, "c")) c = v; else if (!strcmp(from, "f")) c = (v - 32) * 5.0 / 9.0; else c = v - 273.15;
+        if (!strcmp(to, "c")) out = c; else if (!strcmp(to, "f")) out = c * 9.0 / 5.0 + 32; else out = c + 273.15;
+    } else {
+        out = v * a->factor / b->factor;
+    }
+    printf("%.10g %s = %.10g %s\n", v, from, out, to);
+}
+
+/* ---------------- Base converter ---------------- */
+
+static void printBinary(unsigned long long x) {
+    char buf[70];
+    int i = 0;
+    if (x == 0) { puts("0"); return; }
+    while (x) { buf[i++] = (x & 1) ? '1' : '0'; x >>= 1; }
+    while (i--) putchar(buf[i]);
+    putchar('\n');
+}
+
+static void doBase(const char *rest) {
+    char tok[64];
+    int base = 10;
+    char *end;
+    long long v;
+    unsigned long long u;
+    int got = sscanf(rest, "%63s %d", tok, &base);
+    if (got < 1) { puts("Usage: base <number> [from_base]   e.g. base ff 16"); return; }
+    if (got < 2) base = 10;
+    if (base < 2 || base > 36) { puts("Base must be between 2 and 36."); return; }
+    v = strtoll(tok, &end, base);
+    if (*end) { puts("Number is not valid in that base."); return; }
+    u = v < 0 ? (unsigned long long)(-v) : (unsigned long long)v;
+    printf("%sDecimal    : %lld\n", "", v);
+    printf("Binary     : %s", v < 0 ? "-" : ""); printBinary(u);
+    printf("Octal      : %s%llo\n", v < 0 ? "-" : "", u);
+    printf("Hexadecimal: %s%llX\n", v < 0 ? "-" : "", u);
+}
+
+/* ---------------- Special solvers ---------------- */
+
+static int getArgs(const char *rest, double *v, int need, const char *usage) {
+    char err[96];
+    int n = parseList(rest, v, need, err, sizeof err);
+    if (n < 0) { printf("Error: %s\n", err); return 0; }
+    if (n != need) { printf("Usage: %s\n", usage); return 0; }
+    return 1;
+}
+
+static void doQuad(const char *rest) {
+    double v[3], a, b, c, d;
+    if (!getArgs(rest, v, 3, "quad a, b, c   (solves ax^2 + bx + c = 0)")) return;
+    a = v[0]; b = v[1]; c = v[2];
+    if (a == 0) {
+        if (b == 0) { puts("Not an equation (a and b are both 0)."); return; }
+        printf("Linear equation: x = %.10g\n", -c / b);
+        return;
+    }
+    d = b * b - 4 * a * c;
+    printf("Discriminant = %.10g\n", d);
+    if (d > 0) {
+        printf("Two real roots:\n x1 = %.10g\n x2 = %.10g\n", (-b + sqrt(d)) / (2 * a), (-b - sqrt(d)) / (2 * a));
+    } else if (d == 0) {
+        printf("One repeated root: x = %.10g\n", -b / (2 * a));
+    } else {
+        printf("Complex roots:\n x1 = %.10g + %.10gi\n x2 = %.10g - %.10gi\n",
+               -b / (2 * a), sqrt(-d) / (2 * a), -b / (2 * a), sqrt(-d) / (2 * a));
+    }
+}
+
+static void doLinear(const char *rest) {
+    double v[6], det;
+    if (!getArgs(rest, v, 6, "linear a1, b1, c1, a2, b2, c2   (a1x+b1y=c1, a2x+b2y=c2)")) return;
+    det = v[0] * v[4] - v[1] * v[3];
+    if (fabs(det) < 1e-12) { puts("No unique solution (lines are parallel or identical)."); return; }
+    printf("x = %.10g\ny = %.10g\n", (v[2] * v[4] - v[1] * v[5]) / det, (v[0] * v[5] - v[2] * v[3]) / det);
+}
+
+static void doEmi(const char *rest) {
+    double v[3], r, n, emi, total;
+    if (!getArgs(rest, v, 3, "emi principal, annual_rate_percent, years")) return;
+    n = v[2] * 12;
+    r = v[1] / 12.0 / 100.0;
+    if (n <= 0 || v[0] <= 0 || v[1] < 0) { puts("Values must be positive."); return; }
+    emi = (r == 0) ? v[0] / n : v[0] * r * pow(1 + r, n) / (pow(1 + r, n) - 1);
+    total = emi * n;
+    printf("Monthly EMI    : %.2f\nTotal payment  : %.2f\nTotal interest : %.2f\n", emi, total, total - v[0]);
+}
+
+static void doInterest(const char *rest, int compound) {
+    double v[4];
+    if (!compound) {
+        if (!getArgs(rest, v, 3, "si principal, rate_percent, years")) return;
+        printf("Simple interest = %.2f\nTotal amount    = %.2f\n", v[0] * v[1] * v[2] / 100.0, v[0] + v[0] * v[1] * v[2] / 100.0);
+    } else {
+        double amt;
+        if (!getArgs(rest, v, 4, "ci principal, rate_percent, years, times_per_year")) return;
+        if (v[3] <= 0) { puts("times_per_year must be positive."); return; }
+        amt = v[0] * pow(1 + v[1] / 100.0 / v[3], v[3] * v[2]);
+        printf("Compound interest = %.2f\nTotal amount      = %.2f\n", amt - v[0], amt);
+    }
+}
+
+/* ---------------- Memory ---------------- */
+
+static void doMemory(const char *cmd, const char *rest) {
+    double v = last_answer;
+    char err[96];
+    if (*rest) {
+        if (!evaluate(rest, &v, err, sizeof err)) { printf("Error: %s\n", err); return; }
+    }
+    if (!strcmp(cmd, "m+")) { memory_value += v; printf("M = "); printNumber(memory_value); putchar('\n'); }
+    else if (!strcmp(cmd, "m-")) { memory_value -= v; printf("M = "); printNumber(memory_value); putchar('\n'); }
+}
+
+/* ---------------- Help ---------------- */
+
+static void showHelp(void) {
+    puts("\n=========== ADVANCED CALCULATOR HELP ===========");
+    puts("EXPRESSIONS   2+3*4   (2+3)^2   -2^2   7%3   5!   |−4|   2**3");
+    puts("CONSTANTS     pi  e  tau  phi  ans (last result)");
+    puts("VARIABLES     x = 5*2      then use x in any expression");
+    puts("TRIG          sin cos tan asin acos atan atan2(y,x) sinh cosh tanh");
+    puts("POWER/ROOT    sqrt(x) cbrt(x) pow(a,b) root(x,n) exp(x) hypot(a,b)");
+    puts("LOGS          ln(x) log(x) log2(x) logb(base,x)");
+    puts("ROUNDING      floor ceil round(x) round(x,places) abs sign");
+    puts("NUMBER THEORY gcd(a,b) lcm(a,b) ncr(n,r) npr(n,r) isprime(n) fib(n) fact(n)");
+    puts("STATISTICS    sum avg median std sstd var max min product  (any number of args)");
+    puts("OTHER         pct(p,x)  rand()  randint(a,b)  deg(x)  rad(x)  mod(a,b)");
+    puts("\nCOMMANDS");
+    puts("  deg / rad            switch angle mode (current shown by 'mode')");
+    puts("  m+ [expr] m- [expr]  add/subtract to memory (default: last answer)");
+    puts("  mr  mc               recall / clear memory");
+    puts("  vars                 list variables");
+    puts("  history | clearhistory | save   (save writes calc_history.txt)");
+    puts("  base <num> [from]    base converter     e.g. base 255   |  base ff 16");
+    puts("  convert v from to    unit converter     e.g. convert 100 km mi");
+    puts("  units                list supported units");
+    puts("  quad a, b, c         quadratic equation solver");
+    puts("  linear a1,b1,c1,a2,b2,c2   solve 2 linear equations");
+    puts("  emi P, rate%, years  loan EMI");
+    puts("  si P, rate%, years   simple interest");
+    puts("  ci P, rate%, years, n  compound interest");
+    puts("  help | exit");
+    puts("================================================\n");
+}
+
+static void showUnits(void) {
+    puts("Length : m km cm mm mi yd ft in");
+    puts("Mass   : kg g mg lb oz ton");
+    puts("Time   : s min h day week");
+    puts("Data   : b kb mb gb");
+    puts("Speed  : ms kmh mph");
+    puts("Temp   : c f k");
+}
+
+/* ---------------- Command handling ---------------- */
+
+/* Returns 1 if line matched a command (handled), 0 otherwise. */
+static int handleCommand(const char *line, int *quit) {
+    char cmd[32];
+    const char *rest;
+    int len = 0;
+    const char *p = line;
+
+    while (*p && !isspace((unsigned char)*p) && len < 31) cmd[len++] = (char)tolower((unsigned char)*p++);
+    cmd[len] = '\0';
+    if (*p && !isspace((unsigned char)*p)) return 0; /* word too long */
+    while (isspace((unsigned char)*p)) p++;
+    rest = p;
+
+    if (!strcmp(cmd, "exit") || !strcmp(cmd, "quit") || !strcmp(cmd, "q")) { *quit = 1; return 1; }
+    if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) { showHelp(); return 1; }
+    if (!strcmp(cmd, "history")) { showHistory(); return 1; }
+    if (!strcmp(cmd, "clearhistory")) { clearHistory(); puts("History cleared."); return 1; }
+    if (!strcmp(cmd, "save")) { saveHistory(); return 1; }
+    if (!strcmp(cmd, "deg") && !*rest) { degree_mode = 1; puts("Angle mode: DEGREES"); return 1; }
+    if (!strcmp(cmd, "rad") && !*rest) { degree_mode = 0; puts("Angle mode: RADIANS"); return 1; }
+    if (!strcmp(cmd, "mode")) { printf("Angle mode: %s\n", degree_mode ? "DEGREES" : "RADIANS"); return 1; }
+    if (!strcmp(cmd, "m+") || !strcmp(cmd, "m-")) { doMemory(cmd, rest); return 1; }
+    if (!strcmp(cmd, "mr")) { printf("M = "); printNumber(memory_value); putchar('\n'); last_answer = memory_value; return 1; }
+    if (!strcmp(cmd, "mc")) { memory_value = 0; puts("Memory cleared."); return 1; }
+    if (!strcmp(cmd, "vars")) {
+        char b[64];
+        if (!var_count) puts("No variables defined. Try: x = 10");
+        for (int i = 0; i < var_count; i++) { formatNumber(vars[i].value, b, sizeof b); printf("%s = %s\n", vars[i].name, b); }
+        return 1;
+    }
+    if (!strcmp(cmd, "base")) { doBase(rest); return 1; }
+    if (!strcmp(cmd, "convert")) { doConvert(rest); return 1; }
+    if (!strcmp(cmd, "units")) { showUnits(); return 1; }
+    if (!strcmp(cmd, "quad")) { doQuad(rest); return 1; }
+    if (!strcmp(cmd, "linear")) { doLinear(rest); return 1; }
+    if (!strcmp(cmd, "emi")) { doEmi(rest); return 1; }
+    if (!strcmp(cmd, "si")) { doInterest(rest, 0); return 1; }
+    if (!strcmp(cmd, "ci")) { doInterest(rest, 1); return 1; }
+    return 0;
+}
+
+/* Detects "name = expression". Returns 1 if it is an assignment. */
+static int tryAssignment(const char *line) {
+    char name[NAME_LEN];
+    const char *p = line;
+    int len = 0;
+    double v;
+    char err[96];
+
+    if (!(isalpha((unsigned char)*p) || *p == '_')) return 0;
+    while ((isalnum((unsigned char)*p) || *p == '_') && len < NAME_LEN - 1) name[len++] = (char)tolower((unsigned char)*p++);
+    name[len] = '\0';
+    while (isspace((unsigned char)*p)) p++;
+    if (*p != '=' || p[1] == '=') return 0;
+    p++;
+    if (isReserved(name)) { printf("Error: '%s' is a reserved name.\n", name); return 1; }
+    if (!evaluate(p, &v, err, sizeof err)) { printf("Error: %s\n", err); return 1; }
+    if (!setVar(name, v)) { puts("Error: too many variables."); return 1; }
+    printf("%s = ", name); printNumber(v); putchar('\n');
+    last_answer = v;
+    return 1;
+}
+
+static void trim(char *s) {
+    char *start = s;
+    size_t n;
+    while (isspace((unsigned char)*start)) start++;
+    memmove(s, start, strlen(start) + 1);
+    n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = '\0';
+}
+
+int main(void) {
+    char line[MAX_LINE];
+    int quit = 0;
+
+    srand((unsigned)time(NULL));
+    puts("=====================================");
+    puts("      ADVANCED CALCULATOR (C)");
+    puts("  Type an expression, or 'help'.");
+    puts("=====================================");
+
+    while (!quit) {
+        double result;
+        char err[96];
+
+        printf("calc> ");
+        if (!fgets(line, sizeof line, stdin)) break;
+        trim(line);
+        if (!*line) continue;
+
+        if (handleCommand(line, &quit)) continue;
+        if (tryAssignment(line)) continue;
+
+        if (evaluate(line, &result, err, sizeof err)) {
+            printf("= ");
+            printNumber(result);
+            putchar('\n');
+            last_answer = result;
+            addHistory(line, result);
+        } else {
+            printf("Error: %s\n", err);
+        }
+    }
+
+    clearHistory();
     puts("Goodbye!");
     return 0;
 }
