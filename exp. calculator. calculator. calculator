@@ -313,7 +313,7 @@ static int evalPostfix(const Token *pf, int n, double *res, char *err, int trace
     }
 
     for (int i = 0; i < n; i++) {
-        char action[128] = "", tb[40], sb[256], x[40], y[40], z[40];
+        char action[160] = "", tb[40], sb[256], x[40], y[40], z[40];
 
         if (pf[i].type == T_NUM) {
             if (st.top >= MAX_TOK - 1) { strcpy(err, "Operand stack overflow"); return 0; }
@@ -369,7 +369,7 @@ static int evalPrefix(const Token *pf, int n, double *res, char *err, int trace)
     }
 
     for (int i = n - 1; i >= 0; i--) {
-        char action[128] = "", tb[40], sb[256], x[40], y[40], z[40];
+        char action[160] = "", tb[40], sb[256], x[40], y[40], z[40];
 
         if (pf[i].type == T_NUM) {
             if (st.top >= MAX_TOK - 1) { strcpy(err, "Operand stack overflow"); return 0; }
@@ -537,6 +537,21 @@ static int readLine(const char *prompt, char *buf, size_t sz) {
     return 1;
 }
 
+/* Simple mode: type a full expression, get only the result. */
+static void doSimple(void) {
+    char expr[MAX_INPUT], postfix[MAX_STR], prefix[MAX_STR], err[ERR_SZ], rb[64];
+    double result;
+
+    if (!readLine("Enter expression: ", expr, sizeof expr)) return;
+    if (calculateInfix(expr, &result, postfix, sizeof postfix, prefix, sizeof prefix, err, 0)) {
+        fmt(result, rb, sizeof rb);
+        printf("Result = %s\n", rb);
+        addHistory(expr, postfix, prefix, result);
+    } else {
+        printf("Invalid expression: %s\n", err);
+    }
+}
+
 static void doInfix(int trace) {
     char expr[MAX_INPUT], postfix[MAX_STR], prefix[MAX_STR], err[ERR_SZ], rb[64];
     double result;
@@ -636,29 +651,31 @@ int main(void) {
     puts("=========================================");
 
     for (;;) {
-        puts("\n 1. Evaluate infix expression");
-        puts(" 2. Evaluate infix with step-by-step trace");
-        puts(" 3. Evaluate postfix expression");
-        puts(" 4. Evaluate prefix expression");
-        puts(" 5. View history");
-        puts(" 6. Clear history");
-        puts(" 7. Run built-in tests");
-        puts(" 8. Help (precedence table & algorithm)");
-        puts(" 9. Exit");
+        puts("\n 1. Calculate (type full expression, get result)");
+        puts(" 2. Evaluate infix with postfix & prefix");
+        puts(" 3. Evaluate infix with step-by-step trace");
+        puts(" 4. Evaluate postfix expression");
+        puts(" 5. Evaluate prefix expression");
+        puts(" 6. View history");
+        puts(" 7. Clear history");
+        puts(" 8. Run built-in tests");
+        puts(" 9. Help (precedence table & algorithm)");
+        puts(" 10. Exit");
         if (!readLine("Choose: ", line, sizeof line)) break;
         choice = (int)strtol(line, NULL, 10);
 
         switch (choice) {
-            case 1: doInfix(0); break;
-            case 2: doInfix(1); break;
-            case 3: doDirect(0); break;
-            case 4: doDirect(1); break;
-            case 5: showHistory(); break;
-            case 6: clearHistory(); puts("History cleared."); break;
-            case 7: runTests(); break;
-            case 8: showHelp(); break;
-            case 9: clearHistory(); puts("Goodbye!"); return 0;
-            default: puts("Please choose a number from 1 to 9.");
+            case 1: doSimple(); break;
+            case 2: doInfix(0); break;
+            case 3: doInfix(1); break;
+            case 4: doDirect(0); break;
+            case 5: doDirect(1); break;
+            case 6: showHistory(); break;
+            case 7: clearHistory(); puts("History cleared."); break;
+            case 8: runTests(); break;
+            case 9: showHelp(); break;
+            case 10: clearHistory(); puts("Goodbye!"); return 0;
+            default: puts("Please choose a number from 1 to 10.");
         }
     }
 
